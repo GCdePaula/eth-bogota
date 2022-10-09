@@ -10,8 +10,29 @@
 // CONDITIONS OF ANY KIND, either express or implied. See the License for the
 // specific language governing permissions and limitations under the License.
 
+use echo_backend::State;
 use json::{object, JsonValue};
 use std::env;
+
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum Payload {
+    AddContributor {
+        merkle_proof: Vec<u8>,
+        contributor: [u8; 32],
+    },
+
+    RemoveContributor {
+        merkle_proof: Vec<u8>,
+        contributor: [u8; 32],
+    },
+
+    AddContribution {
+        zk_proof: Vec<u8>,
+        contribution: [u8; 32],
+    },
+}
 
 async fn print_response<T: hyper::body::HttpBody>(
     response: hyper::Response<T>,
@@ -47,11 +68,32 @@ pub async fn handle_advance(
     client: &hyper::Client<hyper::client::HttpConnector>,
     server_addr: &str,
     request: JsonValue,
+    state: &mut State,
 ) -> Result<&'static str, Box<dyn std::error::Error>> {
     println!("Received advance request data {}", &request);
     let payload = request["data"]["payload"]
         .as_str()
         .ok_or("Missing payload")?;
+
+    let parsed_payload: Payload = bincode::deserialize(payload.as_bytes())?;
+
+    match parsed_payload {
+        Payload::AddContributor {
+            merkle_proof,
+            contributor,
+        } => state.add_contributor(merkle_proof, contributor)?,
+
+        Payload::RemoveContributor {
+            merkle_proof,
+            contributor,
+        } => state.remove_contributor(merkle_proof, contributor)?,
+
+        Payload::AddContribution {
+            zk_proof,
+            contribution,
+        } => state.add_contribution(zk_proof, contribution)?,
+    };
+
     println!("Adding notice");
     let notice = object! {"payload" => format!("{}", payload)};
     let req = hyper::Request::builder()
@@ -87,6 +129,8 @@ pub async fn handle_inspect(
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut state = State::new();
+
     let client = hyper::Client::new();
     let server_addr = env::var("ROLLUP_HTTP_SERVER_URL")?;
 
@@ -119,8 +163,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .as_str()
                 .ok_or("request_type is not a string")?;
             status = match request_type {
-                "advance_state" => handle_advance(&client, &server_addr[..], req).await?,
-                "inspect_state" => handle_inspect(&client, &server_addr[..], req).await?,
+                "advance_state" => {
+                    handle_advance(&client, &server_addr[..], req, &mut state)
+                        .await?
+                }
+                "inspect_state" => {
+                    handle_inspect(&client, &server_addr[..], req).await?
+                }
                 &_ => {
                     eprintln!("Unknown request type");
                     "reject"
